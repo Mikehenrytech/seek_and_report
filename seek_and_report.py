@@ -12,6 +12,7 @@ Search Java source files for a pattern with grep-like context and reporting cont
 - Relative paths (to root)
 - Optional Windows path separator output
 - Optional ANSI bold highlighting OR a configurable marker prefix (default "==>")
+- Optional report export to .txt using a sanitized pattern as filename
 - Final counters (total/context/summary)
 
 Python 3.9+
@@ -22,7 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, TextIO
 
 ANSI_BOLD = "\x1b[1m"
 ANSI_RESET = "\x1b[0m"
@@ -75,7 +76,6 @@ def is_java_commented(line: str, rx: re.Pattern) -> bool:
     if pos_comment != -1:
         before = line[:pos_comment]
         after = line[pos_comment + 2:]
-        # If pattern appears only in the comment portion -> ignore
         if not rx.search(before) and rx.search(after):
             return True
 
@@ -88,16 +88,11 @@ def is_java_commented(line: str, rx: re.Pattern) -> bool:
 
 def iter_files(root: Path, include_glob: str, exclude_dirs: set[str]) -> Iterable[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
-        # prevent descending into excluded directories
         dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
-
         for name in filenames:
             p = Path(dirpath) / name
-
-            # exclude tests by path convention
             if is_test_path(p):
                 continue
-
             if p.match(include_glob):
                 yield p
 
@@ -121,7 +116,7 @@ def find_match_indexes(lines: List[str], rx: re.Pattern) -> List[int]:
 
 
 # -----------------------------
-# Output formatting
+# Output formatting / writing
 # -----------------------------
 
 def format_line(
@@ -132,13 +127,6 @@ def format_line(
     bold_match: bool,
     marker: Optional[str],
 ) -> str:
-    """
-    Format a single line with optional line numbers, bolding or marker prefix.
-
-    marker:
-      - If not None and is_match -> prefix the content with marker (e.g. '==>')
-      - If bold_match and is_match -> wrap the content in ANSI bold
-    """
     prefix = ""
     if show_line_numbers:
         sep = ":" if is_match else "-"
@@ -153,6 +141,53 @@ def format_line(
         out = f"{ANSI_BOLD}{out}{ANSI_RESET}"
 
     return prefix + out
+
+
+class MultiWriter:
+    """Write to stdout and optionally to a file (tee)."""
+    def __init__(self, file_handle: Optional[TextIO] = None):
+        self.file_handle = file_handle
+
+    def write(self, s: str) -> None:
+        # stdout
+        sys.stdout.write(s)
+        sys.stdout.flush()
+        # file
+        if self.file_handle:
+            self.file_handle.write(s)
+            self.file_handle.flush()
+
+    def writeln(self, s: str = "") -> None:
+        self.write(s + "\n")
+
+
+def sanitize_filename_from_pattern(pattern: str, max_len: int = 120) -> str:
+    """
+    Create a safe filename from the pattern:
+      - Replace path separators and unsafe chars with '_'
+      - Collapse repeated underscores
+      - Trim length
+      - Fallback to 'report' if empty
+    """
+    # Normalize whitespace
+    p = pattern.strip()
+
+    # Replace separators and common dangerous chars early
+    p = p.replace("\\", "_").replace("/", "_").replace(os.sep, "_")
+
+    # Replace everything that isn't alnum, dot, dash, underscore with underscore
+    p = re.sub(r"[^A-Za-z0-9._-]+", "_", p)
+
+    # Collapse underscores and trim
+    p = re.sub(r"_+", "_", p).strip("._-")
+
+    if not p:
+        p = "report"
+
+    if len(p) > max_len:
+        p = p[:max_len].rstrip("._-")
+
+    return p
 
 
 # -----------------------------
@@ -174,16 +209,10 @@ def scan_file_global_threshold(
     summary_line: bool,
     separator_windows_os: bool,
 ) -> Optional[str]:
-    """
-    Global-threshold behavior:
-      - For the first X matches (globally), print context blocks.
-      - From match X+1 onward, print only "path (line)" or "path (line) <line text>" if --summary-line.
-    """
     match_idxs = find_match_indexes(lines, rx)
     if not match_idxs:
         return None
 
-    # relative path (short output)
     try:
         rel = path.relative_to(root)
     except Exception:
@@ -218,15 +247,11 @@ def scan_file_global_threshold(
                         marker=marker,
                     )
                 )
-
             out.append("")
         else:
             state["summary_used"] += 1
-
             if summary_line:
                 text = lines[mi].rstrip("\n")
-                # For summary mode, marker/bold can still apply to the snippet if desired.
-                # Marker here is not prepended to the path; it’s applied to the line text only.
                 if marker:
                     text = f"{marker} {text}"
                 if bold_match:
@@ -264,13 +289,10 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("--literal", action="store_true", help="Treat pattern as a literal string (not regex).")
 
     p.add_argument("--bold", action="store_true", help="ANSI bold on the matched line (if terminal supports it).")
-
-    # Marker: useful when bold isn't available (CI logs, etc.)
     p.add_argument(
         "--marker",
         default="==>",
-        help='Prefix marker for matched lines in context (default: "==>"). '
-             "Use --marker '' to disable marker output.",
+        help='Prefix marker for matched lines (default: "==>"). Use --marker "" to disable.',
     )
 
     g = p.add_mutually_exclusive_group()
@@ -283,7 +305,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         "--max-context-total",
         type=int,
         default=20,
-        help="Global threshold X: first X matches are printed with context; from X+1 onward summary only. "
+        help="Global threshold X: first X matches printed with context; from X+1 onward summary only. "
              "Use -1 to always print context.",
     )
 
@@ -299,6 +321,18 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help=r"Print paths using Windows separators (\) instead of '/'.",
     )
 
+    # ✅ NEW: export report to .txt
+    p.add_argument(
+        "--export-txt",
+        action="store_true",
+        help="Export the full report to a .txt file named after the sanitized pattern (in the current directory).",
+    )
+    p.add_argument(
+        "--export-dir",
+        default=".",
+        help="Directory where the .txt report will be written (default: current directory).",
+    )
+
     return p.parse_args(argv)
 
 
@@ -307,18 +341,25 @@ def main(argv: List[str]) -> int:
 
     root = Path(args.root).resolve()
     exclude_dirs = {d.strip() for d in args.exclude_dirs.split(",") if d.strip()}
-
     rx = compile_pattern(args.pattern, ignore_case=args.ignore_case, literal=args.literal)
 
-    # Default: show line numbers unless explicitly disabled
     show_line_numbers = not args.no_line_numbers
 
-    # Marker behavior:
-    # - If --bold is set, marker is still allowed (can be noisy). If you prefer, set marker to None when bold is enabled.
-    #   Here we keep it enabled by default unless user disables it explicitly.
-    marker = args.marker
+    marker: Optional[str] = args.marker
     if marker == "":
-        marker = None  # allow disabling marker with --marker ""
+        marker = None
+
+    # Prepare optional export file
+    file_handle: Optional[TextIO] = None
+    export_path: Optional[Path] = None
+    if args.export_txt:
+        sanitized = sanitize_filename_from_pattern(args.pattern)
+        export_dir = Path(args.export_dir).expanduser().resolve()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_path = export_dir / f"{sanitized}.txt"
+        file_handle = export_path.open("w", encoding="utf-8", newline="\n")
+
+    writer = MultiWriter(file_handle=file_handle)
 
     state = {
         "matches_seen": 0,
@@ -328,42 +369,53 @@ def main(argv: List[str]) -> int:
 
     had_any = False
 
-    for f in iter_files(root, args.include, exclude_dirs):
-        try:
-            lines = f.read_text(encoding=args.encoding, errors="replace").splitlines(True)
-        except Exception as e:
-            # Non-fatal: report and continue
-            print(f"{f}\n[ERROR] {e}")
-            had_any = True
-            continue
+    try:
+        for f in iter_files(root, args.include, exclude_dirs):
+            try:
+                lines = f.read_text(encoding=args.encoding, errors="replace").splitlines(True)
+            except Exception as e:
+                writer.writeln(f"{f}")
+                writer.writeln(f"[ERROR] {e}")
+                had_any = True
+                continue
 
-        r = scan_file_global_threshold(
-            root=root,
-            path=f,
-            lines=lines,
-            rx=rx,
-            before=args.before,
-            after=args.after,
-            show_line_numbers=show_line_numbers,
-            bold_match=args.bold,
-            marker=marker,
-            max_context_total=args.max_context_total,
-            state=state,
-            summary_line=args.summary_line,
-            separator_windows_os=args.separator_windows_os,
-        )
+            r = scan_file_global_threshold(
+                root=root,
+                path=f,
+                lines=lines,
+                rx=rx,
+                before=args.before,
+                after=args.after,
+                show_line_numbers=show_line_numbers,
+                bold_match=args.bold,
+                marker=marker,
+                max_context_total=args.max_context_total,
+                state=state,
+                summary_line=args.summary_line,
+                separator_windows_os=args.separator_windows_os,
+            )
 
-        if r:
-            if had_any:
-                print("\n" + "-" * 80 + "\n")
-            print(r)
-            had_any = True
+            if r:
+                if had_any:
+                    writer.writeln("\n" + "-" * 80 + "\n")
+                writer.writeln(r)
+                had_any = True
 
-    print("\n" + "=" * 50)
-    print(f"Total coincidences: {state['matches_seen']}")
-    print(f"With context:       {state['context_used']}")
-    print(f"In summary mode:    {state['summary_used']}")
-    print("=" * 50)
+        # Final counters
+        writer.writeln("")
+        writer.writeln("=" * 50)
+        writer.writeln(f"Total coincidences: {state['matches_seen']}")
+        writer.writeln(f"With context:       {state['context_used']}")
+        writer.writeln(f"In summary mode:    {state['summary_used']}")
+        writer.writeln("=" * 50)
+
+        # Helpful note if exported
+        if export_path is not None:
+            writer.writeln(f"\n[export] Report written to: {export_path}")
+
+    finally:
+        if file_handle:
+            file_handle.close()
 
     return 0 if had_any else 1
 
