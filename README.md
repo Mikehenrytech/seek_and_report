@@ -1,5 +1,6 @@
 # Seek and report
 
+
 > *Searching and reporting Java patterns since 1983 🤘*
 
 A lightweight Python tool to search for patterns in Java source code
@@ -17,9 +18,13 @@ minimize noisy reports.
     -   inline comments after `//`
 -   Automatic exclusion of test sources under `/src/test/`
 -   Optional **bold highlighting** for matched lines\
+-   Optional **marker prefix** for environments without ANSI (default
+    `==>`)\
 -   Optional line numbers\
 -   Relative paths for clean output\
--   Optional Windows style path separator (`\`)
+-   Optional Windows style path separator (`\`)\
+-   Optional export of the full report to a **.txt file** using a
+    sanitized pattern as filename
 
 ------------------------------------------------------------------------
 
@@ -58,6 +63,28 @@ python3 scan_context.py "printStackTrace\(\);" . -i --bold
 
 ``` bash
 python3 scan_context.py ".printStackTrace();" . --literal
+```
+
+------------------------------------------------------------------------
+
+## Marker Option (for non-ANSI environments)
+
+When bold is not available (CI logs, plain text), use a marker prefix:
+
+``` bash
+python3 scan_context.py "pattern" . --marker "==>"
+```
+
+Custom marker:
+
+``` bash
+python3 scan_context.py "pattern" . --marker "[ALERT]"
+```
+
+Disable marker:
+
+``` bash
+python3 scan_context.py "pattern" . --marker ""
 ```
 
 ------------------------------------------------------------------------
@@ -102,6 +129,24 @@ python3 scan_context.py "pattern" . --max-context-total 10 --summary-line
 ``` bash
 python3 scan_context.py "pattern" . --max-context-total -1
 ```
+
+------------------------------------------------------------------------
+
+## Export Report to TXT
+
+Generate a file named after the sanitized pattern:
+
+``` bash
+python3 scan_context.py "printStackTrace\(\);" . --export-txt
+```
+
+Export to a specific directory:
+
+``` bash
+python3 scan_context.py "printStackTrace\(\);" . --export-txt --export-dir reports
+```
+
+The filename is automatically sanitized to be safe for any filesystem.
 
 ------------------------------------------------------------------------
 
@@ -152,7 +197,7 @@ e.printStackTrace();
 
     90-    logger.info("start");
     91-    try {
-    95:    e.printStackTrace();
+    95:    ==> e.printStackTrace();
     96-    }
 
 After threshold exceeded:
@@ -180,6 +225,7 @@ After threshold exceeded:
       -i, --ignore-case
       --literal
       --bold
+      --marker
       -B N, --before N
       -A N, --after N
       -n, --line-numbers
@@ -187,6 +233,8 @@ After threshold exceeded:
       --max-context-total X
       --summary-line
       --separator-windows-os
+      --export-txt
+      --export-dir
       --include GLOB
       --exclude-dirs D1,D2
       --encoding ENC
@@ -221,4 +269,4 @@ Use freely for security auditing and code quality purposes.
 
 ------------------------------------------------------------------------
 
-**seek and report... they're looking for you!**
+**Seek and report... they're looking for you!**
