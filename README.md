@@ -1,4 +1,4 @@
-# seek_and_report
+# Seek and report
 
 > *Searching and reporting Java patterns since 1983 🤘*
 
